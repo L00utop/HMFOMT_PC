@@ -1,0 +1,3 @@
+[submodule "external/fomt"]
+	path = external/fomt
+	url = https://github.com/StanHash/fomt.git

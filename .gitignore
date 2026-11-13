@@ -1,0 +1,32 @@
+# Binaries and build outputs
+build/
+bin/
+obj/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Copyrighted ROMs & Game Archives (DO NOT COMMIT)
+*.gba
+*.bin
+*.zip
+*.7z
+*.rar
+baserom.gba
+
+# Save files & logs
+saves/
+*.sav
+*.log
+
+# IDE & Editor files
+.vscode/
+.vs/
+.idea/
+*.user
+*.suo
+CMakeSettings.json
+compile_commands.json
