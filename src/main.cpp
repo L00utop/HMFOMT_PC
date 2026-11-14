@@ -11,7 +11,7 @@ void print_usage() {
     std::cout << "Harvest Moon: Friends of Mineral Town - Native PC Port (GBA HAL + Coop)\n"
               << "Options:\n"
               << "  --scale <1..6>          Integer window scale (default: 3 -> 720x480)\n"
-              << "  --rom <path>            Optional path to US baserom.gba\n"
+              << "  --rom <path>            Path to any Friends of Mineral Town (US) .gba ROM\n"
               << "  --save <path>           Save file path (default: saves/fomt.sav)\n"
               << "  --host [port]           Start UDP Coop Host (default port 7777)\n"
               << "  --connect <ip:port>     Connect to UDP Coop Host (e.g. 127.0.0.1:7777)\n"
@@ -74,8 +74,8 @@ int main(int argc, char* argv[]) {
             std::cout << "[ROM] Loaded official US ROM: " << engine.rom_info().title
                       << " [" << engine.rom_info().game_code << "]\n";
         } else {
-            std::cout << "[ROM] No official baserom.gba detected. Running in clean-room fallback mode.\n"
-                      << "      To play with official game code & assets, place your US Friends of Mineral Town .gba\n"
+            std::cout << "[ROM] No Friends of Mineral Town (US) .gba ROM detected. Running in clean-room fallback mode.\n"
+                      << "      To play with official game code & assets, place any .gba file of the game\n"
                       << "      in the game folder, drag & drop it onto hmfomt_pc.exe, or run with --rom <path>.\n";
         }
     }

@@ -11,23 +11,28 @@ Featuring full hardware-level emulation (ARM7TDMI CPU, GBA PPU rasterizer, direc
 This repository **does not contain any copyrighted game ROMs, proprietary binaries, or copyrighted audio/graphical assets**.
 
 * All source code in this repository was written independently as an open-source engine and HAL.
-* To play with original assets and code, **you must provide your own legally dumped copy** of *Harvest Moon: Friends of Mineral Town (US)* (`baserom.gba`, Game Code: `A4NE`).
+* To play with official game code and assets, **you must provide your own ROM copy** of *Harvest Moon: Friends of Mineral Town (US)* in `.gba` format.
+* **Filename does not matter**: The engine checks the internal cartridge header (`HARVESTMOGBA` / `A4NE`), so you do **not** need to rename your ROM file.
 * This project follows the same legal model as other preservation and PC port projects (such as *Ship of Harkinian*, *SM64-PC*, *OpenGOAL*, and standalone emulators).
 
 ---
 
 ## 🚀 How to Run
 
-### Option 1: Drag & Drop (Easiest)
-Drag and drop your `Friends of Mineral Town (U).gba` file directly onto `hmfomt_pc.exe` in Windows Explorer.
+> [!NOTE]
+> If your ROM is inside a compressed archive (`.zip` or `.7z`), make sure to extract the `.gba` file first.
 
-### Option 2: Place in Game Directory
-Rename or copy your ROM as `baserom.gba` (or place any valid `.gba` file) in the same directory as `hmfomt_pc.exe`. The game automatically detects and loads it on startup.
+### Option 1: Place in the Game Folder (Easiest)
+Copy your `.gba` file (with any filename) into the same folder as `hmfomt_pc.exe`.
+The game automatically detects and validates it on startup.
+
+### Option 2: Drag & Drop
+Drag and drop any `.gba` file directly onto `hmfomt_pc.exe` in Windows Explorer.
 
 ### Option 3: Command Line
 Launch with the `--rom` parameter:
 ```bash
-hmfomt_pc.exe --rom "C:/Path/To/Your/HarvestMoon.gba"
+hmfomt_pc.exe --rom "path/to/any_rom_name.gba"
 ```
 
 ---
@@ -42,7 +47,7 @@ hmfomt_pc.exe --host 7777
 
 ### Join a Game:
 ```bash
-hmfomt_pc.exe --connect 192.168.1.100:7777
+hmfomt_pc.exe --connect <HOST_IP>:7777
 ```
 *(Or press `F10` in-game to connect to localhost)*
 
