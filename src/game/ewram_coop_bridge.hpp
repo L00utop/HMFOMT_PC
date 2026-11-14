@@ -145,7 +145,9 @@ private:
     std::array<hal::u8, WORLD_SYNC_BYTES> pending_world_{};
     std::array<bool, WORLD_SYNC_BYTES>    pending_world_dirty_{};
     std::array<bool, WORLD_SYNC_BYTES>    pending_world_monotonic_{};
+    std::array<hal::u8, WORLD_SYNC_BYTES> local_world_prev_{};
     std::array<hal::u8, WORLD_SYNC_BYTES> local_world_hold_{};
+    std::array<hal::u8, 7>                local_forage_cleared_mask_{};
     bool has_pending_world_ = false;
 
     bool pending_peer_sync_[MAX_COOP_PLAYERS]{};

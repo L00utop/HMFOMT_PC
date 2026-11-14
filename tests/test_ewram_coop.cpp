@@ -806,6 +806,185 @@ int main() {
             }
             assert(host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 3u) == 0xA5u);
             assert(host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 12u) == 0x5Au);
+
+            // 4. Real-time Wild Forageable / Boulder MapRenderer clearing + concurrent same-byte merge
+            std::vector<u8> mock_rom(0x110000u, 0u);
+            auto rom_w8 = [&](u32 rom_addr, u8 v) {
+                mock_rom[rom_addr - 0x08000000u] = v;
+            };
+            auto rom_w16 = [&](u32 rom_addr, u16 v) {
+                const u32 off = rom_addr - 0x08000000u;
+                mock_rom[off + 0u] = static_cast<u8>(v & 0xFFu);
+                mock_rom[off + 1u] = static_cast<u8>((v >> 8) & 0xFFu);
+            };
+            auto rom_w32 = [&](u32 rom_addr, u32 v) {
+                const u32 off = rom_addr - 0x08000000u;
+                mock_rom[off + 0u] = static_cast<u8>(v & 0xFFu);
+                mock_rom[off + 1u] = static_cast<u8>((v >> 8) & 0xFFu);
+                mock_rom[off + 2u] = static_cast<u8>((v >> 16) & 0xFFu);
+                mock_rom[off + 3u] = static_cast<u8>((v >> 24) & 0xFFu);
+            };
+            auto write_forage_desc = [&](u32 idx, u32 obj_type, u32 map_id, i16 px, i16 py) {
+                const u32 addr = 0x081043BCu + idx * 12u;
+                rom_w32(addr + 0u, obj_type);
+                rom_w32(addr + 4u, map_id);
+                rom_w16(addr + 8u, static_cast<u16>(px));
+                rom_w16(addr + 10u, static_cast<u16>(py));
+            };
+
+            // GetMapData dimensions (128x88) for map_data_id 10 (outdoor) and 0x24 (Coop)
+            rom_w16(0x08105EDCu + 10u * 40u + 0x20u, 128u);
+            rom_w16(0x08105EDCu + 10u * 40u + 0x22u, 88u);
+            rom_w16(0x08105EDCu + 0x24u * 40u + 0x20u, 128u);
+            rom_w16(0x08105EDCu + 0x24u * 40u + 0x22u, 88u);
+
+            // Spring Grass #0 (idx=0 -> bit 0), #1 (idx=1 -> bit 1), Mountain Boulder (idx=0x60 -> bit 36 = byte 4 bit 4)
+            write_forage_desc(0u, 0u, 10u, 32, 48);
+            write_forage_desc(1u, 0u, 10u, 48, 48);
+            write_forage_desc(0x60u, 0x14u, 10u, 80, 64);
+
+            // Mock Coop bushel ROM patch (0x08106C8Cu) and X coordinate table (0x081073C4u)
+            rom_w8(0x081073C4u + 0u, 5u);
+            rom_w8(0x08106C8Cu + 0u, 1u); // w = 1
+            rom_w8(0x08106C8Cu + 1u, 1u); // h = 1
+            rom_w32(0x08106C8Cu + 8u, 0x08107600u);  // BG1 tile array
+            rom_w32(0x08106C8Cu + 16u, 0x08107610u); // collision palette
+            rom_w32(0x08106C8Cu + 20u, 0x08107620u); // collision indices
+            rom_w16(0x08107600u, 0x1111u);
+            rom_w32(0x08107610u + 4u, 0x00020001u);
+            rom_w8(0x08107620u, 1u);
+
+            assert(host_bus.load_rom(mock_rom.data(), mock_rom.size()));
+            assert(client_bus.load_rom(mock_rom.data(), mock_rom.size()));
+
+            auto setup_mr_on_bus = [&](GbaBus& b, u32 active_map_id, u32 map_data_id) {
+                b.write32(SCENE_ADDR + EwramCoopBridge::OFF_SCENE_MAP_RENDERER, MR_ADDR);
+                b.write32(MR_ADDR + 0x00u, active_map_id);
+                b.write32(MR_ADDR + 0x04u, map_data_id);
+                b.write32(MR_ADDR + 0x10u, BG0_ADDR);
+                b.write32(MR_ADDR + 0x14u, BG1_ADDR);
+                b.write32(MR_ADDR + 0x18u, BG2_ADDR);
+                b.write32(MR_ADDR + 0x2Cu, COL_ADDR);
+                b.write8(MR_ADDR + 0x29u, 0u);
+                b.write8(GS_ADDR + 0x0011u, 0u); // Spring
+            };
+            setup_mr_on_bus(host_bus, 10u, 10u);
+            setup_mr_on_bus(client_bus, 10u, 10u);
+
+            auto fill_forage_rect = [&](GbaBus& b, u32 tx, u32 ty, u32 w, u32 h) {
+                for (u32 dy = 0u; dy < h; ++dy) {
+                    for (u32 dx = 0u; dx < w; ++dx) {
+                        const u32 cell = cell_off(tx + dx, ty + dy);
+                        b.write16(BG1_ADDR + cell * 2u, 0x1234u);
+                        b.write32(COL_ADDR + cell * 4u, (0x0123u << 17) | 0x00010001u);
+                    }
+                }
+            };
+            auto assert_forage_cleared = [&](const GbaBus& b, u32 tx, u32 ty, u32 w, u32 h) {
+                assert(b.read8(MR_ADDR + 0x29u) == 1u);
+                for (u32 dy = 0u; dy < h; ++dy) {
+                    for (u32 dx = 0u; dx < w; ++dx) {
+                        const u32 cell = cell_off(tx + dx, ty + dy);
+                        assert(b.read16(BG1_ADDR + cell * 2u) == 0x03FFu);
+                        assert((b.read8(COL_ADDR + cell * 4u) & 1u) == 0u);
+                        const u16 col_hi = b.read16(COL_ADDR + cell * 4u + 2u);
+                        assert((col_hi & ~1u) == 0u);
+                        assert((col_hi & 1u) == 1u);
+                    }
+                }
+            };
+
+            for (u32 k = 0u; k < 7u; ++k) {
+                host_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + k, 0xFFu);
+                client_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + k, 0xFFu);
+            }
+            for (int t = 0; t < 22; ++t) {
+                sync_step();
+            }
+
+            fill_forage_rect(host_bus, 4u, 6u, 2u, 2u);
+            fill_forage_rect(host_bus, 6u, 6u, 2u, 2u);
+            fill_forage_rect(host_bus, 10u, 8u, 6u, 4u);
+            fill_forage_rect(client_bus, 4u, 6u, 2u, 2u);
+            fill_forage_rect(client_bus, 6u, 6u, 2u, 2u);
+            fill_forage_rect(client_bus, 10u, 8u, 6u, 4u);
+            host_bus.write8(MR_ADDR + 0x29u, 0u);
+            client_bus.write8(MR_ADDR + 0x29u, 0u);
+
+            // (a) Remote Mountain Boulder smash (byte 4, bit 4: 0xFF -> 0xEF) clears 6x4 patch in Host MapRenderer
+            client_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 4u, 0xEFu);
+            for (int t = 0; t < 30; ++t) {
+                sync_step();
+                host_bridge.update_before_frame(host_bus, host_net);
+                if (host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 4u) == 0xEFu) {
+                    break;
+                }
+            }
+            assert(host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 4u) == 0xEFu);
+            assert_forage_cleared(host_bus, 10u, 8u, 6u, 4u);
+            assert(host_bus.read16(BG1_ADDR + cell_off(4u, 6u) * 2u) == 0x1234u);
+
+            // (b) Concurrent same-frame same-byte pickups (Client clears bit 0, Host clears bit 1 of byte 0) -> 0xFCu on both
+            host_bus.write8(MR_ADDR + 0x29u, 0u);
+            client_bus.write8(MR_ADDR + 0x29u, 0u);
+            client_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 0u, 0xFEu);
+            host_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 0u, 0xFDu);
+            for (int t = 0; t < 30; ++t) {
+                sync_step();
+                host_bridge.update_before_frame(host_bus, host_net);
+                if (host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 0u) == 0xFCu &&
+                    client_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 0u) == 0xFCu) {
+                    break;
+                }
+            }
+            for (int t = 0; t < 4; ++t) {
+                sync_step();
+            }
+            assert(host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 0u) == 0xFCu);
+            assert(client_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_WILD_FORAGE + 0u) == 0xFCu);
+            assert_forage_cleared(host_bus, 4u, 6u, 2u, 2u);
+            assert(host_bus.read16(BG1_ADDR + cell_off(6u, 6u) * 2u) == 0x1234u);
+            assert_forage_cleared(client_bus, 6u, 6u, 2u, 2u);
+            assert(client_bus.read16(BG1_ADDR + cell_off(4u, 6u) * 2u) == 0x1234u);
+
+            // (c) Coop feed bushel MapRenderer sync (Client places bushel 0 -> Host applies 0x08106C8Cu at (5, 8))
+            host_bus.write32(MR_ADDR + 0x04u, 0x24u);
+            host_bus.write8(MR_ADDR + 0x29u, 0u);
+            client_bus.write32(GS_ADDR + EwramCoopBridge::OFF_GS_COOP, 0x00001001u);
+            for (int t = 0; t < 30; ++t) {
+                sync_step();
+                host_bridge.update_before_frame(host_bus, host_net);
+                if (host_bus.read32(GS_ADDR + EwramCoopBridge::OFF_GS_COOP) == 0x00001001u) {
+                    break;
+                }
+            }
+            assert(host_bus.read32(GS_ADDR + EwramCoopBridge::OFF_GS_COOP) == 0x00001001u);
+            assert(host_bus.read8(MR_ADDR + 0x29u) == 1u);
+            assert(host_bus.read16(BG1_ADDR + cell_off(5u, 8u) * 2u) == 0x1111u);
+            assert(host_bus.read32(COL_ADDR + cell_off(5u, 8u) * 4u) == 0x00020001u);
+
+            // (d) local_world_prev_ hold check: after Host updates byte 0x01->0x02, Client's newer 0x03 arrives cleanly during hold
+            host_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u, 0x01u);
+            client_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u, 0x01u);
+            for (int t = 0; t < 22; ++t) {
+                sync_step();
+            }
+            host_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u, 0x02u);
+            for (int t = 0; t < 10; ++t) {
+                sync_step();
+                if (client_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u) == 0x02u) {
+                    break;
+                }
+            }
+            assert(client_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u) == 0x02u);
+            client_bus.write8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u, 0x03u);
+            for (int t = 0; t < 6; ++t) {
+                sync_step();
+                if (host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u) == 0x03u) {
+                    break;
+                }
+            }
+            assert(host_bus.read8(GS_ADDR + EwramCoopBridge::OFF_GS_COOP + 1u) == 0x03u);
         }
     }
 

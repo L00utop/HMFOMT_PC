@@ -496,12 +496,12 @@ void refresh_single_farm_plot_in_map_renderer(
                     const u32 n8 = (neighbor >> 8) & 0xFu;
                     return n2 != 0x14u || n8 == 7u || n8 < unk8;
                 };
-                if (breaks_edge(has_above, above_raw)) {
-                    if (!breaks_edge(has_below, below_raw)) {
+                if (breaks_edge(has_below, below_raw)) {
+                    if (!breaks_edge(has_above, above_raw)) {
                         rel_idx += 1u;
                     }
                 } else {
-                    rel_idx += breaks_edge(has_below, below_raw) ? 2u : 3u;
+                    rel_idx += breaks_edge(has_above, above_raw) ? 2u : 3u;
                 }
             }
         }
@@ -588,6 +588,256 @@ void refresh_farm_field_plot_in_map_renderer(
     }
 }
 
+void read_map_dimensions(const GbaBus& bus, u32 map_data_id, u32& out_w, u32& out_h) {
+    u32 w = 0u;
+    u32 h = 0u;
+    if (map_data_id <= 0x42u) {
+        const u32 entry = 0x08105EDCu + map_data_id * 40u;
+        w = bus.read16(entry + 0x20u);
+        h = bus.read16(entry + 0x22u);
+    }
+    if (w == 0u || w > 256u || h == 0u || h > 256u) {
+        out_w = 128u;
+        out_h = 88u;
+        return;
+    }
+    out_w = w;
+    out_h = h;
+}
+
+void clear_map_renderer_rect_layer1(GbaBus& bus, u32 mr, i32 tx, i32 ty, u32 w, u32 h) {
+    u32 map_w = 128u;
+    u32 map_h = 88u;
+    read_map_dimensions(bus, bus.read32(mr + 0x04u), map_w, map_h);
+    const u32 bg1 = bus.read32(mr + 0x14u);
+    const u32 col = bus.read32(mr + 0x2Cu);
+    if (!is_valid_ewram_ptr(bg1, map_w * map_h * 2u) ||
+        !is_valid_ewram_ptr(col, map_w * map_h * 4u)) {
+        return;
+    }
+
+    for (u32 dy = 0u; dy < h; ++dy) {
+        const i32 cy = ty + static_cast<i32>(dy);
+        if (cy < 0 || cy >= static_cast<i32>(map_h)) continue;
+        for (u32 dx = 0u; dx < w; ++dx) {
+            const i32 cx = tx + static_cast<i32>(dx);
+            if (cx < 0 || cx >= static_cast<i32>(map_w)) continue;
+            const u32 cell = static_cast<u32>(cy) * map_w + static_cast<u32>(cx);
+            bus.write16(bg1 + cell * 2u, 0x03FFu);
+            const u32 col_addr = col + cell * 4u;
+            const u8 b0 = bus.read8(col_addr);
+            bus.write8(col_addr, static_cast<u8>(b0 & ~1u));
+            const u16 h2 = bus.read16(col_addr + 2u);
+            bus.write16(col_addr + 2u, static_cast<u16>(h2 & 1u));
+        }
+    }
+    bus.write8(mr + 0x29u, 1u);
+}
+
+void refresh_wild_forage_in_map_renderer(
+    GbaBus& bus,
+    u32 scene_ptr,
+    u32 gs_ptr,
+    const u8* prev_forage7,
+    const u8* cur_forage7)
+{
+    if (!is_valid_ewram_ptr(scene_ptr, 0x10u) ||
+        !is_valid_ewram_ptr(gs_ptr, EwramCoopBridge::OFF_GS_WILD_FORAGE + 16u)) {
+        return;
+    }
+    const u32 mr = bus.read32(scene_ptr + EwramCoopBridge::OFF_SCENE_MAP_RENDERER);
+    if (!is_valid_ewram_ptr(mr, 0x30u)) {
+        return;
+    }
+    const u32 active_map_id = bus.read32(mr + 0x00u);
+    const u8 season = static_cast<u8>(bus.read8(gs_ptr + 0x0011u) & 3u);
+
+    u32 start_idx = 0u;
+    u32 end_idx = 0x1Au;
+    switch (season) {
+        case 1u: start_idx = 0x1Au; end_idx = 0x3Au; break;
+        case 2u: start_idx = 0x3Au; end_idx = 0x5Eu; break;
+        case 3u: start_idx = 0x5Eu; end_idx = 0x60u; break;
+        default: break;
+    }
+
+    auto clear_if_removed = [&](u32 idx, u32 bit_idx) {
+        const u32 byte_i = bit_idx >> 3u;
+        const u32 bit_m = 1u << (bit_idx & 7u);
+        if (byte_i >= 7u) return;
+        const bool cur_present = (cur_forage7[byte_i] & bit_m) != 0u;
+        const bool prev_present = (prev_forage7 == nullptr) || ((prev_forage7[byte_i] & bit_m) != 0u);
+        if (cur_present || !prev_present) {
+            return;
+        }
+        const u32 desc_addr = 0x081043BCu + idx * 12u;
+        const u32 obj_type = bus.read32(desc_addr + 0u);
+        const u32 item_map_id = bus.read32(desc_addr + 4u);
+        if (item_map_id != active_map_id || obj_type > 0x15u) {
+            return;
+        }
+        const i16 px = static_cast<i16>(bus.read16(desc_addr + 8u));
+        const i16 py = static_cast<i16>(bus.read16(desc_addr + 10u));
+        const i32 tx = (px >= 0 ? static_cast<i32>(px) : (static_cast<i32>(px) + 7)) >> 3;
+        const i32 ty = (py >= 0 ? static_cast<i32>(py) : (static_cast<i32>(py) + 7)) >> 3;
+        u32 w = 2u;
+        u32 h = 2u;
+        if (obj_type == 0x13u || obj_type == 0x15u) {
+            w = 4u;
+            h = 4u;
+        } else if (obj_type == 0x14u) {
+            w = 6u;
+            h = 4u;
+        }
+        clear_map_renderer_rect_layer1(bus, mr, tx, ty, w, h);
+    };
+
+    for (u32 idx = start_idx; idx < end_idx; ++idx) {
+        clear_if_removed(idx, idx - start_idx);
+    }
+    for (u32 idx = 0x60u; idx <= 0x73u; ++idx) {
+        clear_if_removed(idx, idx - 0x3Cu);
+    }
+}
+
+void apply_rom_patch_desc_in_map_renderer(
+    GbaBus& bus,
+    u32 mr,
+    u32 desc_addr,
+    u32 tx,
+    u32 ty)
+{
+    if (!is_valid_rom_ptr(desc_addr)) {
+        return;
+    }
+    u32 map_w = 128u;
+    u32 map_h = 88u;
+    read_map_dimensions(bus, bus.read32(mr + 0x04u), map_w, map_h);
+
+    const u32 w = bus.read8(desc_addr + 0u);
+    const u32 h = bus.read8(desc_addr + 1u);
+    if (w == 0u || h == 0u || tx + w > map_w || ty + h > map_h) {
+        return;
+    }
+
+    const u32 bg_bytes = map_w * map_h * 2u;
+    for (u32 layer = 0u; layer < 3u; ++layer) {
+        const u32 src_tiles = bus.read32(desc_addr + 4u + layer * 4u);
+        const u32 dst_bg = bus.read32(mr + 0x10u + layer * 4u);
+        if (!is_valid_rom_ptr(src_tiles) || !is_valid_ewram_ptr(dst_bg, bg_bytes)) {
+            continue;
+        }
+        for (u32 row = 0u; row < h; ++row) {
+            for (u32 col_x = 0u; col_x < w; ++col_x) {
+                const u16 tile = bus.read16(src_tiles + (row * w + col_x) * 2u);
+                bus.write16(dst_bg + ((ty + row) * map_w + (tx + col_x)) * 2u, tile);
+            }
+        }
+    }
+
+    const u32 col_pal = bus.read32(desc_addr + 0x10u);
+    const u32 col_idx = bus.read32(desc_addr + 0x14u);
+    const u32 dst_col = bus.read32(mr + 0x2Cu);
+    if (is_valid_rom_ptr(col_pal) && is_valid_rom_ptr(col_idx) &&
+        is_valid_ewram_ptr(dst_col, map_w * map_h * 4u)) {
+        for (u32 row = 0u; row < h; ++row) {
+            for (u32 col_x = 0u; col_x < w; ++col_x) {
+                const u8 idx = bus.read8(col_idx + row * w + col_x);
+                const u32 cval = bus.read32(col_pal + static_cast<u32>(idx) * 4u);
+                bus.write32(dst_col + ((ty + row) * map_w + (tx + col_x)) * 4u, cval);
+            }
+        }
+    }
+    bus.write8(mr + 0x29u, 1u);
+}
+
+void refresh_coop_barn_in_map_renderer(GbaBus& bus, u32 scene_ptr, u32 gs_ptr) {
+    if (!is_valid_ewram_ptr(scene_ptr, 0x10u) ||
+        !is_valid_ewram_ptr(gs_ptr, EwramCoopBridge::OFF_GS_BARN + 0x03ECu)) {
+        return;
+    }
+    const u32 mr = bus.read32(scene_ptr + EwramCoopBridge::OFF_SCENE_MAP_RENDERER);
+    if (!is_valid_ewram_ptr(mr, 0x30u)) {
+        return;
+    }
+    const u32 map_data_id = bus.read32(mr + 0x04u);
+
+    if (map_data_id == 0x24u || map_data_id == 0x25u || map_data_id == 0x40u) {
+        const u32 coop_base = gs_ptr + EwramCoopBridge::OFF_GS_COOP;
+        const u32 coop_hdr = bus.read32(coop_base);
+        const u32 upgrade = coop_hdr & 1u;
+        const u32 capacity = std::min<u32>(8u, 4u + upgrade * 4u);
+        const u32 bushels = (coop_hdr >> 12u) & 0xFFu;
+        const bool has_unk_001_3 = ((coop_hdr >> 11u) & 1u) != 0u;
+
+        for (u32 i = 0u; i < capacity; ++i) {
+            if ((bushels & (1u << i)) == 0u) continue;
+            const u32 tx = (map_data_id == 0x40u)
+                ? bus.read8(0x081073CCu + i)
+                : bus.read8(0x081073C4u + i);
+            const u32 ty = (map_data_id == 0x40u) ? 4u : 8u;
+            apply_rom_patch_desc_in_map_renderer(bus, mr, 0x08106C8Cu, tx, ty);
+        }
+        if (map_data_id == 0x25u && has_unk_001_3) {
+            apply_rom_patch_desc_in_map_renderer(bus, mr, 0x08106C2Cu, 2u, 5u);
+        }
+        const u32 inc_cap = (upgrade == 0u) ? 1u : 2u;
+        for (u32 inc_idx = 0u; inc_idx < inc_cap; ++inc_idx) {
+            const bool occupied = (bus.read8(coop_base + 0x1D8u + inc_idx * 4u) & 0x04u) != 0u;
+            if (!occupied) continue;
+            u32 ty = 0x11u;
+            if (map_data_id == 0x40u) {
+                ty = 0x0Du;
+            } else if (map_data_id == 0x25u && inc_idx != 0u) {
+                ty = 0x0Du;
+            }
+            apply_rom_patch_desc_in_map_renderer(bus, mr, 0x081070C4u, 1u, ty);
+        }
+    } else if (map_data_id == 0x26u || map_data_id == 0x27u || map_data_id == 0x41u) {
+        const u32 barn_base = gs_ptr + EwramCoopBridge::OFF_GS_BARN;
+        const u32 barn_hdr = bus.read32(barn_base);
+        const u32 upgrade = barn_hdr & 1u;
+        const u32 capacity = std::min<u32>(16u, 8u + upgrade * 8u);
+        const u32 preg_cap = 1u + upgrade;
+        const u32 stall_bushels = (barn_hdr >> 13u) & 0xFFFFu;
+        const u32 preg_bushels = (barn_hdr >> 29u) & 0x3u;
+        const bool has_unk_1_3 = ((barn_hdr >> 11u) & 1u) != 0u;
+        const bool has_unk_1_4 = ((barn_hdr >> 12u) & 1u) != 0u;
+
+        for (u32 i = 0u; i < capacity; ++i) {
+            if ((stall_bushels & (1u << i)) == 0u) continue;
+            u32 tx = 0u;
+            u32 ty = 5u;
+            if (map_data_id == 0x26u) {
+                tx = bus.read8(0x081073F0u + i * 2u);
+                ty = bus.read8(0x081073F0u + i * 2u + 1u);
+            } else if (map_data_id == 0x27u) {
+                tx = bus.read8(0x08107400u + i * 2u);
+                ty = bus.read8(0x08107400u + i * 2u + 1u);
+            } else {
+                tx = bus.read8(0x08107420u + i);
+            }
+            apply_rom_patch_desc_in_map_renderer(bus, mr, 0x08106C74u, tx, ty);
+        }
+        if (map_data_id != 0x41u) {
+            for (u32 p_idx = 0u; p_idx < preg_cap; ++p_idx) {
+                if ((preg_bushels & (1u << p_idx)) == 0u) continue;
+                const u32 tx = bus.read8(0x081073D0u + p_idx * 2u);
+                const u32 ty = bus.read8(0x081073D0u + p_idx * 2u + 1u);
+                apply_rom_patch_desc_in_map_renderer(bus, mr, 0x08106C74u, tx, ty);
+            }
+        }
+        if (map_data_id == 0x27u) {
+            if (has_unk_1_3) {
+                apply_rom_patch_desc_in_map_renderer(bus, mr, 0x08106C5Cu, 0x0Cu, 5u);
+            }
+            if (has_unk_1_4) {
+                apply_rom_patch_desc_in_map_renderer(bus, mr, 0x08106C44u, 8u, 5u);
+            }
+        }
+    }
+}
+
 } // namespace
 
 void EwramCoopBridge::reset() {
@@ -621,7 +871,9 @@ void EwramCoopBridge::reset() {
     pending_world_.fill(0u);
     pending_world_dirty_.fill(false);
     pending_world_monotonic_.fill(false);
+    local_world_prev_.fill(0u);
     local_world_hold_.fill(0u);
+    local_forage_cleared_mask_.fill(0u);
     has_pending_world_ = false;
     for (bool& b : pending_peer_sync_) b = false;
     injected_this_frame_ = false;
@@ -880,14 +1132,18 @@ void EwramCoopBridge::update_before_frame(GbaBus& bus, NetCoopSession& net) {
         shadow_initialized_ = false;
         world_shadow_initialized_ = false;
         local_plot_hold_.fill(0u);
+        local_world_prev_.fill(0u);
         local_world_hold_.fill(0u);
+        local_forage_cleared_mask_.fill(0u);
     } else if (local_.gs_ptr != last_gs_ptr_ ||
                (net.role() == NetRole::Host && prev_date_u16 == 0u && local_.date_u16 != 0u)) {
         last_gs_ptr_ = local_.gs_ptr;
         shadow_initialized_ = false;
         world_shadow_initialized_ = false;
         local_plot_hold_.fill(0u);
+        local_world_prev_.fill(0u);
         local_world_hold_.fill(0u);
+        local_forage_cleared_mask_.fill(0u);
         if (net.role() == NetRole::Host) {
             for (std::size_t p = 1; p < MAX_COOP_PLAYERS; ++p) {
                 pending_peer_sync_[p] = true;
@@ -969,9 +1225,23 @@ void EwramCoopBridge::update_before_frame(GbaBus& bus, NetCoopSession& net) {
                         const std::size_t widx = span_start + k;
                         msg.data[k] = live_world[widx];
                         if (live_world[widx] != shadow_world_[widx]) {
+                            if (widx >= 1994u && widx <= 2000u) {
+                                const std::size_t b = widx - 1994u;
+                                if (local_world_hold_[widx] == 0u) {
+                                    local_forage_cleared_mask_[b] = 0u;
+                                }
+                                const u8 newly_cleared =
+                                    static_cast<u8>(shadow_world_[widx] & ~live_world[widx]);
+                                const u8 newly_set =
+                                    static_cast<u8>(live_world[widx] & ~shadow_world_[widx]);
+                                local_forage_cleared_mask_[b] =
+                                    static_cast<u8>((local_forage_cleared_mask_[b] | newly_cleared) & ~newly_set);
+                            }
+                            local_world_prev_[widx] = shadow_world_[widx];
                             shadow_world_[widx] = live_world[widx];
                             local_world_hold_[widx] = 20u;
-                            if (pending_world_dirty_[widx] && !pending_world_monotonic_[widx]) {
+                            if (pending_world_dirty_[widx] && !pending_world_monotonic_[widx] &&
+                                (widx < 1994u || widx > 2000u)) {
                                 pending_world_dirty_[widx] = false;
                             }
                         }
@@ -1012,30 +1282,89 @@ void EwramCoopBridge::update_before_frame(GbaBus& bus, NetCoopSession& net) {
         }
 
         if (has_pending_world_) {
+            std::array<u8, 7> prev_forage{};
+            if (local_.gs_ptr != 0u) {
+                for (std::size_t k = 0; k < prev_forage.size(); ++k) {
+                    prev_forage[k] =
+                        bus.read8(local_.gs_ptr + OFF_GS_WILD_FORAGE + static_cast<u32>(k));
+                }
+            }
+            bool any_forage_changed = false;
+            bool any_coop_barn_changed = false;
             for (std::size_t i = 0; i < WORLD_SYNC_BYTES; ++i) {
                 if (!pending_world_dirty_[i]) continue;
                 const bool mono = pending_world_monotonic_[i];
                 const u8 inc = pending_world_[i];
                 pending_world_dirty_[i] = false;
                 pending_world_monotonic_[i] = false;
+
+                if (i >= 1994u && i <= 2000u) {
+                    const std::size_t b = i - 1994u;
+                    const u32 addr = gs_addr_for_shadow_idx(local_.gs_ptr, i);
+                    if (addr != 0u) {
+                        const u8 cur = bus.read8(addr);
+                        u8 val = inc;
+                        if (inc == 0xFFu) {
+                            local_forage_cleared_mask_[b] = 0u;
+                            local_world_hold_[i] = 0u;
+                        } else {
+                            const u8 mask =
+                                (local_world_hold_[i] > 0u) ? local_forage_cleared_mask_[b] : 0u;
+                            val = static_cast<u8>(inc & ~mask);
+                        }
+                        if (val != cur) {
+                            bus.write8(addr, val);
+                            any_forage_changed = true;
+                        }
+                        shadow_world_[i] = val;
+                    }
+                    continue;
+                }
+
                 if (!mono && local_world_hold_[i] > 0u) {
                     if (inc == shadow_world_[i]) {
                         local_world_hold_[i] = 0u;
+                        continue;
                     }
-                    continue;
+                    if (inc == local_world_prev_[i]) {
+                        continue;
+                    }
+                    local_world_hold_[i] = 0u;
                 }
                 const u32 addr = gs_addr_for_shadow_idx(local_.gs_ptr, i);
                 if (addr != 0u) {
                     const u8 cur = bus.read8(addr);
                     const u8 val = mono ? merge_world_byte(i, cur, inc) : inc;
-                    bus.write8(addr, val);
+                    if (val != cur) {
+                        bus.write8(addr, val);
+                        if (i >= 460u && i < 1944u) {
+                            any_coop_barn_changed = true;
+                        }
+                    }
                     shadow_world_[i] = val;
                 }
             }
+            if (any_forage_changed && local_.gs_ptr != 0u && local_.scene_ptr != 0u) {
+                std::array<u8, 7> cur_forage{};
+                for (std::size_t k = 0; k < cur_forage.size(); ++k) {
+                    cur_forage[k] =
+                        bus.read8(local_.gs_ptr + OFF_GS_WILD_FORAGE + static_cast<u32>(k));
+                }
+                refresh_wild_forage_in_map_renderer(
+                    bus, local_.scene_ptr, local_.gs_ptr, prev_forage.data(), cur_forage.data());
+            }
+            if (any_coop_barn_changed && local_.gs_ptr != 0u && local_.scene_ptr != 0u) {
+                refresh_coop_barn_in_map_renderer(bus, local_.scene_ptr, local_.gs_ptr);
+            }
             has_pending_world_ = false;
         }
-        for (u8& h : local_world_hold_) {
-            if (h > 0u) --h;
+        for (std::size_t i = 0; i < WORLD_SYNC_BYTES; ++i) {
+            if (local_world_hold_[i] > 0u) {
+                --local_world_hold_[i];
+                if (local_world_hold_[i] == 0u && i >= 1994u && i <= 2000u) {
+                    local_forage_cleared_mask_[i - 1994u] = 0u;
+                }
+            }
         }
 
         if (pending_initial_world_apply_) {
