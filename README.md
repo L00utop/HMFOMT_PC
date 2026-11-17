@@ -91,3 +91,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j
 ctest --test-dir build --output-on-failure
 ```
+
+---
+
+> 🤖 *Developed with AI-assisted engineering.*
